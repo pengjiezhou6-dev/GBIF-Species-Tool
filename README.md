@@ -7,10 +7,10 @@
 
 ## 功能特性
 
-- 🔐 **GBIF 账号登录** - 支持用户名密码认证
+- � **GBIF 账号登录** - 支持用户名密码认证
 - ⚡ **异步下载** - 使用 GBIF occurrences.download API 进行大规模异步下载
 - 📚 **历史复用** - 自动检测并复用 GBIF 账号中已有的历史下载记录
-- 🔍 **智能物种识别** - 自动解析物种学名为 GBIF usageKey
+- �🔍 **智能物种识别** - 自动解析物种学名为 GBIF usageKey
 - 📊 **批量处理** - 支持同时处理多个物种
 - 🔄 **自动去重** - 智能去除重复记录
 - 📁 **自定义保存路径** - 可指定输出目录
@@ -50,10 +50,11 @@ python app.py
 1. 在 GitHub 创建新仓库
 2. 将以下文件上传到仓库：
    - `app.py`
-   - `templates/index.html`
+   - `index.html`
    - `requirements.txt`
    - `runtime.txt`
    - `Procfile`
+   - `README.md`
 3. 访问 Render.com 并使用 GitHub 登录
 4. 创建新的 Web Service
 5. 选择您的仓库
@@ -64,7 +65,7 @@ python app.py
 | 文件 | 说明 |
 |------|------|
 | `app.py` | Flask 主程序 |
-| `templates/index.html` | Web 界面 |
+| `index.html` | Web 前端界面 |
 | `requirements.txt` | Python 依赖 |
 | `Procfile` | 部署配置 |
 | `runtime.txt` | Python 版本 |
