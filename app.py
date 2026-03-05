@@ -6,6 +6,9 @@ import sys
 import time
 import re
 import threading
+import requests
+import uuid
+import zipfile
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import pandas as pd
@@ -33,6 +36,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 global_logs = []
 global_progress = 0
 global_species_info = []
+global_download_files = []
 is_running = False
 
 
@@ -71,163 +75,124 @@ def is_taxon_id(input_str: str) -> bool:
     return input_str.strip().isdigit()
 
 
-class GBIFDataFetcher:
-    """GBIF 数据获取类"""
+class GBIFAsyncDownloader:
+    """GBIF 异步下载器"""
     
-    def __init__(self, log_callback=None):
+    def __init__(self, username: str, password: str, email: str, log_callback=None):
+        self.username = username
+        self.password = password
+        self.email = email
+        self.credentials = (username, password)
         self.log_callback = log_callback
-        self.request_delay = 0.5
-    
+
     def log(self, message: str):
-        """输出日志"""
         if self.log_callback:
             self.log_callback(message)
-        else:
-            print(message)
-    
-    def get_species_info_by_id(self, taxon_key: int) -> Optional[Dict]:
-        """通过 taxonKey 获取物种详细信息"""
-        try:
-            result = species.name_usage(key=taxon_key)
-            if result:
-                info = {
-                    'key': result.get('key', taxon_key),
-                    'scientificName': result.get('scientificName', ''),
-                    'canonicalName': result.get('canonicalName', ''),
-                    'rank': result.get('rank', ''),
-                    'status': result.get('status', ''),
-                    'kingdom': result.get('kingdom', ''),
-                    'phylum': result.get('phylum', ''),
-                    'class': result.get('class', ''),
-                    'order': result.get('order', ''),
-                    'family': result.get('family', ''),
-                    'genus': result.get('genus', ''),
-                    'species': result.get('species', '')
-                }
-                return info
-            return None
-        except Exception as e:
-            self.log(f"  错误：获取 ID {taxon_key} 的物种信息时发生异常：{str(e)}")
-            return None
-    
-    def get_usage_key(self, species_name: str) -> Optional[int]:
-        """通过学名获取 usageKey"""
-        try:
-            result = species.name_backbone(species_name)
-            if result and 'usage' in result:
-                usage_key = result['usage'].get('key')
-                if usage_key:
-                    self.log(f"  找到物种 '{species_name}' 的 usageKey: {usage_key}")
-                    return int(usage_key)
-            self.log(f"  警告：未找到物种 '{species_name}' 的 usageKey")
-            return None
-        except Exception as e:
-            self.log(f"  错误：查询物种 '{species_name}' 时发生异常：{str(e)}")
-            return None
-    
-    def get_species_info_by_name(self, species_name: str) -> Optional[Dict]:
-        """通过学名获取物种信息（包含 usageKey）"""
-        try:
-            result = species.name_backbone(species_name)
-            if result and 'usage' in result:
-                usage_info = result['usage']
-                classification = result.get('classification', [])
-                
-                class_dict = {c.get('rank', '').lower(): c.get('name', '') for c in classification}
-                
-                info = {
-                    'key': usage_info.get('key', ''),
-                    'scientificName': usage_info.get('name', ''),
-                    'canonicalName': usage_info.get('canonicalName', ''),
-                    'rank': usage_info.get('rank', ''),
-                    'status': usage_info.get('status', ''),
-                    'kingdom': class_dict.get('kingdom', ''),
-                    'phylum': class_dict.get('phylum', ''),
-                    'class': class_dict.get('class', ''),
-                    'order': class_dict.get('order', ''),
-                    'family': class_dict.get('family', ''),
-                    'genus': class_dict.get('genus', ''),
-                    'species': usage_info.get('canonicalName', '')
-                }
-                return info
-            return None
-        except Exception as e:
-            self.log(f"  错误：查询物种 '{species_name}' 时发生异常：{str(e)}")
-            return None
-    
-    def resolve_input(self, input_str: str) -> Tuple[Optional[int], Optional[Dict]]:
-        """智能解析输入"""
-        input_str = input_str.strip()
-        
-        if is_taxon_id(input_str):
-            taxon_key = int(input_str)
-            self.log(f"  检测到输入为 ID: {taxon_key}")
-            species_info = self.get_species_info_by_id(taxon_key)
-            if species_info:
-                self.log(f"  物种名称：{species_info.get('scientificName', '未知')}")
-                return taxon_key, species_info
-            else:
-                self.log(f"  警告：无法获取 ID {taxon_key} 的物种信息")
-                return taxon_key, {'key': taxon_key, 'scientificName': f'ID:{taxon_key}'}
-        else:
-            self.log(f"  检测到输入为学名：{input_str}")
-            species_info = self.get_species_info_by_name(input_str)
-            if species_info:
-                usage_key = species_info.get('key')
-                if usage_key:
-                    self.log(f"  找到对应 ID: {usage_key}")
-                    return int(usage_key), species_info
-            return None, None
-    
-    def fetch_occurrences(self, usage_key: int, year_range: Tuple[int, int]) -> List[Dict]:
-        """获取物种出现记录"""
-        all_records = []
-        offset = 0
-        page_size = 300
-        
-        year_start, year_end = year_range
-        
-        self.log(f"  开始获取数据 (年份范围：{year_start}-{year_end})...")
-        
-        while True:
+
+    def get_usage_keys(self, species_names: List[str]) -> List[int]:
+        """获取物种的 usageKeys"""
+        usage_keys = []
+        for name in species_names:
             try:
-                params = {
-                    'taxonKey': usage_key,
-                    'year': f'{year_start},{year_end}',
-                    'limit': page_size,
-                    'offset': offset,
-                    'hasCoordinate': True
-                }
-                
-                result = occ.search(**params)
-                
-                if result and 'results' in result:
-                    records = result['results']
-                    if not records:
-                        self.log(f"  已获取所有可用数据，共 {len(all_records)} 条记录")
-                        break
-                    
-                    all_records.extend(records)
-                    self.log(f"  已获取 {len(all_records)} 条记录...")
-                    
-                    if len(records) < page_size:
-                        break
-                    
-                    offset += page_size
-                    time.sleep(self.request_delay)
-                else:
-                    break
-                    
+                result = species.name_backbone(name)
+                if result:
+                    usage_info = result.get('usage', {})
+                    if isinstance(usage_info, dict) and 'key' in usage_info:
+                        usage_keys.append(usage_info['key'])
+                        self.log(f"  找到 '{name}' 的 usageKey: {usage_info['key']}")
             except Exception as e:
-                self.log(f"  警告：获取数据时发生错误：{str(e)}")
-                time.sleep(2)
-                continue
+                self.log(f"  错误：获取 '{name}' 的 usageKey 失败: {e}")
+        return usage_keys
+
+    def submit_download_request(self, usage_keys: List[int], year_range: Optional[Tuple[int, int]] = None) -> str:
+        """提交异步下载请求"""
+        predicates = [
+            {"type": "in", "key": "TAXON_KEY", "values": usage_keys},
+            {"type": "equals", "key": "HAS_COORDINATE", "value": "true"},
+            {"type": "equals", "key": "HAS_GEOSPATIAL_ISSUE", "value": "false"}
+        ]
         
-        return all_records
+        if year_range:
+            year_start, year_end = year_range
+            predicates.append({
+                "type": "and",
+                "predicates": [
+                    {"type": "greaterThanOrEquals", "key": "YEAR", "value": str(year_start)},
+                    {"type": "lessThanOrEquals", "key": "YEAR", "value": str(year_end)}
+                ]
+            })
+        
+        request_body = {
+            "creator": self.email,
+            "notificationAddresses": [self.email],
+            "sendNotification": True,
+            "format": "SIMPLE_CSV",
+            "predicate": {
+                "type": "and",
+                "predicates": predicates
+            }
+        }
+        
+        response = requests.post(
+            "https://api.gbif.org/v1/occurrence/download/request",
+            json=request_body,
+            auth=self.credentials,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 201:
+            download_key = response.text.strip()
+            self.log(f"  下载请求已提交，Download Key: {download_key}")
+            return download_key
+        else:
+            raise Exception(f"提交下载请求失败: {response.status_code} - {response.text}")
+
+    def check_download_status(self, download_key: str) -> Dict:
+        """检查下载状态"""
+        response = requests.get(
+            f"https://api.gbif.org/v1/occurrence/download/{download_key}",
+            auth=self.credentials
+        )
+        return response.json()
+
+    def download_zip(self, download_url: str, use_auth: bool = True) -> bytes:
+        """下载 ZIP 文件"""
+        if use_auth:
+            response = requests.get(download_url, auth=self.credentials, stream=True, timeout=300)
+        else:
+            response = requests.get(download_url, stream=True, timeout=300)
+        return response.content
 
 
-class DataProcessor:
-    """数据处理类"""
+def find_matching_download(username: str, password: str, usage_keys: List[int], year_range: Optional[Tuple[int, int]] = None) -> Optional[Dict]:
+    """查找匹配的历史下载"""
+    try:
+        result = occ.download_list(user=username, pwd=password, limit=50)
+        for item in result.get('results', []):
+            if item.get('status') != 'SUCCEEDED':
+                continue
+            
+            request_info = item.get('request', {})
+            predicate = request_info.get('predicate', {})
+            
+            if predicate.get('type') != 'and':
+                continue
+            
+            found_taxon_keys = set()
+            for p in predicate.get('predicates', []):
+                if p.get('key') == 'TAXON_KEY' and p.get('type') == 'in':
+                    found_taxon_keys = set(p.get('values', []))
+            
+            if found_taxon_keys == set(usage_keys):
+                return item
+        return None
+    except Exception:
+        return None
+
+
+def process_gbif_zip_bytes(zip_bytes: bytes, output_path: str, host_class_default: str = '', log_callback=None):
+    """处理 GBIF ZIP 文件"""
+    chunk_size = 50000
     
     FIELD_MAPPING = {
         'species': 'scientificName',
@@ -237,177 +202,229 @@ class DataProcessor:
         'admin1': 'stateProvince',
         'year': 'year',
         'source': None,
-        'event_type': None,
         'n_individuals': 'individualCount',
         'host_class': None,
+        'obs_type': None,
         'remarks': None
     }
     
-    def __init__(self, log_callback=None):
-        self.log_callback = log_callback
+    def log(msg):
+        if log_callback:
+            log_callback(msg)
     
-    def log(self, message: str):
-        if self.log_callback:
-            self.log_callback(message)
+    log(f"开始解压 ZIP 文件...")
     
-    def process_records(self, records: List[Dict]) -> pd.DataFrame:
-        """处理原始记录，进行字段映射和去重"""
-        if not records:
-            return pd.DataFrame()
+    zip_buffer = io.BytesIO(zip_bytes)
+    with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+        csv_files = [f for f in zip_file.namelist() if f.endswith('.csv')]
+        if not csv_files:
+            return False, "ZIP 中未找到 CSV 文件", 0
         
-        self.log(f"  开始处理 {len(records)} 条记录...")
+        csv_file = csv_files[0]
+        log(f"找到数据文件: {csv_file}")
         
-        processed_data = []
+        all_data = []
+        total_records = 0
         
-        for record in records:
-            processed = {}
+        with zip_file.open(csv_file) as f:
+            for chunk in pd.read_csv(f, chunksize=chunk_size, sep='\t', encoding='utf-8', on_bad_lines='skip'):
+                total_records += len(chunk)
+                log(f"已读取 {total_records} 条记录...")
+                
+                processed_chunk = []
+                for _, row in chunk.iterrows():
+                    processed = {}
+                    processed['species'] = format_species_code(row.get('scientificName', ''))
+                    processed['longitude'] = row.get('decimalLongitude', '')
+                    processed['latitude'] = row.get('decimalLatitude', '')
+                    
+                    country_code = row.get('countryCode', '')
+                    processed['country'] = convert_country_code(country_code)
+                    
+                    processed['admin1'] = row.get('stateProvince', '')
+                    processed['year'] = row.get('year', '')
+                    processed['source'] = 'GBIF'
+                    processed['n_individuals'] = row.get('individualCount', 1)
+                    processed['host_class'] = host_class_default
+                    processed['obs_type'] = 'occurrence'
+                    processed['remarks'] = ''
+                    
+                    processed_chunk.append(processed)
+                
+                all_data.extend(processed_chunk)
+        
+        if not all_data:
+            return False, "未获取到有效数据", 0
+        
+        log(f"共读取 {total_records} 条记录，开始去重...")
+        
+        final_df = pd.DataFrame(all_data)
+        original_count = len(final_df)
+        final_df = final_df.drop_duplicates(subset=['species', 'longitude', 'latitude', 'year'], keep='first')
+        
+        log(f"去重完成：{original_count} -> {len(final_df)} 条记录")
+        
+        if output_path.endswith('.xlsx'):
+            final_df.to_excel(output_path, index=False, engine='openpyxl')
+        else:
+            final_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+        
+        log(f"文件已保存: {output_path}")
+        
+        return True, f"成功处理 {len(final_df)} 条记录", len(final_df)
+
+
+def export_data(df: pd.DataFrame, output_path: str, output_format: str):
+    """导出数据"""
+    if output_format == 'xlsx':
+        df.to_excel(output_path, index=False, engine='openpyxl')
+    elif output_format == 'csv':
+        df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    elif output_format == 'json':
+        df.to_json(output_path, orient='records', force_ascii=False, indent=2)
+
+
+def process_data(inputs: List[str], year_range: Tuple[int, int], output_mode: str,
+                 template_columns: List[str] = None, output_format: str = 'xlsx',
+                 host_class_default: str = '', gbif_credentials: Dict = None) -> Tuple[bool, str, List]:
+    """处理数据获取任务 - 使用异步下载"""
+    global global_logs, global_progress, global_species_info, global_download_files, is_running
+    
+    try:
+        downloader = GBIFAsyncDownloader(
+            gbif_credentials['username'],
+            gbif_credentials['password'],
+            gbif_credentials['email'],
+            log_callback=lambda msg: global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        )
+
+        global_download_files = []
+
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 正在解析 {len(inputs)} 个物种...")
+        usage_keys = downloader.get_usage_keys(inputs)
+
+        if not usage_keys:
+            return False, "未找到有效的物种 usageKey", []
+
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 成功获取 {len(usage_keys)} 个 usageKeys")
+
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 检查历史下载记录...")
+        existing_download = find_matching_download(
+            gbif_credentials['username'],
+            gbif_credentials['password'],
+            usage_keys,
+            year_range
+        )
+
+        if existing_download:
+            download_key = existing_download.get('key')
+            download_url = existing_download.get('downloadLink')
+            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 找到匹配的历史下载！Key: {download_key}")
+            global_progress = 50
             
-            processed['species'] = format_species_code(record.get('scientificName', ''))
-            processed['longitude'] = record.get('decimalLongitude', '')
-            processed['latitude'] = record.get('decimalLatitude', '')
-            
-            country_code = record.get('countryCode', '')
-            processed['country'] = convert_country_code(country_code)
-            
-            processed['admin1'] = record.get('stateProvince', '')
-            
-            year_val = record.get('year', '')
-            processed['year'] = year_val if year_val else ''
-            
-            processed['source'] = 'GBIF'
-            processed['event_type'] = 'occurrence'
-            
-            individual_count = record.get('individualCount', '')
-            if individual_count and str(individual_count).isdigit():
-                processed['n_individuals'] = int(individual_count)
+            if download_url:
+                global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 直接使用历史下载数据")
             else:
-                processed['n_individuals'] = 1
-            
-            processed['host_class'] = ''
-            processed['remarks'] = ''
-            
-            processed_data.append(processed)
+                global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 获取下载链接...")
+                status = downloader.check_download_status(download_key)
+                download_url = status.get('downloadLink')
+                if not download_url:
+                    return False, "无法获取下载链接", []
+        else:
+            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 未找到匹配的历史下载，提交新申请...")
+            download_key = downloader.submit_download_request(usage_keys, year_range)
+            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 下载申请已提交，Download Key: {download_key}")
+            global_progress = 10
+
+            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 等待 GBIF 处理...")
+
+            max_wait_time = 3600
+            wait_interval = 10
+            elapsed = 0
+
+            while elapsed < max_wait_time:
+                if not is_running:
+                    return False, "任务已取消", []
+
+                global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 将在 {wait_interval} 秒后检查状态...")
+
+                time.sleep(wait_interval)
+                elapsed += wait_interval
+
+                status = downloader.check_download_status(download_key)
+                current_status = status.get('status', 'UNKNOWN')
+
+                global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 当前状态: {current_status} (已等待 {elapsed} 秒)")
+
+                global_progress = 10 + min(40, int(elapsed / max_wait_time * 40))
+
+                if current_status == 'SUCCEEDED':
+                    global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 下载准备完成！")
+                    download_url = status.get('downloadLink')
+                    break
+                elif current_status == 'FAILED':
+                    return False, "GBIF 下载任务失败", []
+                elif current_status == 'KILLED':
+                    return False, "GBIF 下载任务被取消", []
+
+            if elapsed >= max_wait_time:
+                return False, "等待超时，请稍后使用 Download Key 手动查询", []
+
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 正在下载数据...")
         
-        df = pd.DataFrame(processed_data)
-        
-        original_count = len(df)
-        df = df.drop_duplicates(subset=['species', 'longitude', 'latitude', 'year'], keep='first')
-        deduplicated_count = len(df)
-        
-        if original_count > deduplicated_count:
-            self.log(f"  自动去重：移除了 {original_count - deduplicated_count} 条重复记录")
-        
-        self.log(f"  数据处理完成，共 {len(df)} 条有效记录")
-        
-        return df
-    
-    def apply_template(self, df: pd.DataFrame, template_path: str) -> pd.DataFrame:
-        """应用用户自定义模板"""
-        try:
-            if template_path.endswith('.xlsx'):
-                template_df = pd.read_excel(template_path, nrows=0)
+        if not download_url:
+            return False, "无法获取下载链接", []
+
+        zip_bytes = downloader.download_zip(download_url)
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] ZIP 下载完成，大小: {len(zip_bytes) / 1024 / 1024:.2f} MB")
+        global_progress = 60
+
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 正在处理数据...")
+
+        date_str = datetime.now().strftime("%Y%m%d")
+        species_name = inputs[0] if inputs else "unknown"
+        safe_species_name = species_name.replace(' ', '_').replace('/', '_').replace('\\', '_')[:30]
+        download_id = download_key if download_key else datetime.now().strftime("%H%M%S")
+        output_filename = f"{safe_species_name}_{date_str}_{download_id}.{output_format}"
+        output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+
+        success, message, record_count = process_gbif_zip_bytes(
+            zip_bytes,
+            output_path,
+            host_class_default,
+            log_callback=lambda msg: global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        )
+
+        if not success:
+            return False, message, []
+
+        global_progress = 90
+
+        if output_mode == 'template' and template_columns:
+            if output_format == 'xlsx':
+                df = pd.read_excel(output_path)
             else:
-                template_df = pd.read_csv(template_path, nrows=0)
-            
-            template_columns = list(template_df.columns)
-            self.log(f"  检测到模板列：{template_columns}")
-            
+                df = pd.read_csv(output_path)
+
             result_df = pd.DataFrame(columns=template_columns)
-            
             for col in template_columns:
                 if col in df.columns:
                     result_df[col] = df[col]
                 else:
                     result_df[col] = ''
-            
-            return result_df
-            
-        except Exception as e:
-            self.log(f"  警告：应用模板失败，使用默认格式：{str(e)}")
-            return df
-    
-    def get_standard_columns(self) -> List[str]:
-        """获取标准输出列名"""
-        return list(self.FIELD_MAPPING.keys())
 
+            export_data(result_df, output_path, output_format)
+            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 模板匹配完成")
 
-def process_data(inputs: List[str], year_range: Tuple[int, int], 
-                 output_mode: str, template_file=None, save_path: str = None) -> Tuple[bool, str, Optional[str]]:
-    """处理数据获取任务"""
-    global global_logs, global_progress, global_species_info
-    
-    try:
-        fetcher = GBIFDataFetcher(log_callback=lambda msg: global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"))
-        processor = DataProcessor(log_callback=lambda msg: global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"))
-        
-        all_data = []
-        total_inputs = len(inputs)
-        
-        for idx, input_str in enumerate(inputs):
-            if not is_running:
-                return False, "任务已取消", None
-            
-            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] \n[{idx + 1}/{total_inputs}] 正在处理：{input_str}")
-            global_progress = int((idx / total_inputs) * 80)
-            
-            usage_key, species_info = fetcher.resolve_input(input_str)
-            
-            if species_info:
-                global_species_info.append(species_info)
-            
-            if usage_key:
-                records = fetcher.fetch_occurrences(usage_key, year_range)
-                
-                if records:
-                    df = processor.process_records(records)
-                    if not df.empty:
-                        all_data.append(df)
-            
-            time.sleep(0.5)
-        
-        if not all_data:
-            return False, "未获取到任何数据", None
-        
-        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] \n正在合并数据...")
-        final_df = pd.concat(all_data, ignore_index=True)
-        
-        if output_mode == 'template' and template_file:
-            template_path = os.path.join(app.config['UPLOAD_FOLDER'], template_file.filename)
-            template_file.save(template_path)
-            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 正在应用模板...")
-            final_df = processor.apply_template(final_df, template_path)
-        else:
-            standard_cols = processor.get_standard_columns()
-            final_df = final_df[standard_cols]
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        first_input = inputs[0].strip()
-        if first_input.isdigit():
-            filename = f"ID{first_input}_点位数据_{timestamp}.csv"
-        else:
-            first_name = first_input.split()[0] if first_input.split() else "species"
-            filename = f"{first_name}_点位数据_{timestamp}.csv"
-        
-        # 确定保存路径
-        if save_path and os.path.isdir(save_path):
-            output_dir = save_path
-            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 使用自定义保存路径：{save_path}")
-        else:
-            output_dir = app.config['UPLOAD_FOLDER']
-            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 使用默认保存路径：{output_dir}")
-        
-        output_path = os.path.join(output_dir, filename)
-        final_df.to_csv(output_path, index=False, encoding='utf-8-sig')
-        
+        global_download_files.append(output_filename)
         global_progress = 100
-        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] \n完成！共保存 {len(final_df)} 条记录")
-        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 文件保存路径：{output_path}")
-        
-        return True, f"成功保存 {len(final_df)} 条记录", output_path
-        
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 完成！共 {record_count} 条记录")
+
+        return True, f"成功处理 {record_count} 条记录", global_download_files
+
     except Exception as e:
-        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] \n发生错误：{str(e)}")
-        return False, str(e), None
+        global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 错误：{str(e)}")
+        return False, str(e), []
 
 
 @app.route('/')
@@ -419,7 +436,7 @@ def index():
 @app.route('/api/fetch', methods=['POST'])
 def fetch():
     """获取数据 API"""
-    global is_running, global_logs, global_progress, global_species_info
+    global is_running, global_logs, global_progress, global_species_info, global_download_files
     
     if is_running:
         return jsonify({'success': False, 'message': '已有任务正在运行'})
@@ -427,6 +444,13 @@ def fetch():
     species_input = request.form.get('species_input', '').strip()
     if not species_input:
         return jsonify({'success': False, 'message': '请输入物种学名或 ID'})
+    
+    gbif_username = request.form.get('gbif_username', '').strip()
+    gbif_password = request.form.get('gbif_password', '').strip()
+    gbif_email = request.form.get('gbif_email', '').strip()
+    
+    if not gbif_username or not gbif_password or not gbif_email:
+        return jsonify({'success': False, 'message': '请填写完整的 GBIF 账号信息'})
     
     try:
         year_start = int(request.form.get('year_start', 2010))
@@ -438,8 +462,14 @@ def fetch():
         return jsonify({'success': False, 'message': '起始年份不能大于结束年份'})
     
     output_mode = request.form.get('output_mode', 'default')
-    template_file = request.files.get('template') if 'template' in request.files else None
-    save_path = request.form.get('save_path', '').strip()
+    output_format = request.form.get('output_format', 'xlsx')
+    host_class_default = request.form.get('host_class_default', '').strip()
+    
+    template_columns = None
+    if output_mode == 'template':
+        template_columns_str = request.form.get('template_columns', '')
+        if template_columns_str:
+            template_columns = [c.strip() for c in template_columns_str.split(',') if c.strip()]
     
     inputs = [s.strip() for s in species_input.split(',') if s.strip()]
     
@@ -447,21 +477,33 @@ def fetch():
     global_logs = []
     global_progress = 0
     global_species_info = []
+    global_download_files = []
     
+    gbif_credentials = {
+        'username': gbif_username,
+        'password': gbif_password,
+        'email': gbif_email
+    }
+
     def run_task():
         global is_running
-        success, message, output_path = process_data(inputs, (year_start, year_end), output_mode, template_file, save_path)
-        is_running = False
-        
-        if success and output_path:
-            global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 下载链接：/api/download/{os.path.basename(output_path)}")
-    
+        try:
+            success, message, files = process_data(
+                inputs, (year_start, year_end), output_mode,
+                template_columns=template_columns,
+                output_format=output_format,
+                host_class_default=host_class_default,
+                gbif_credentials=gbif_credentials
+            )
+        finally:
+            is_running = False
+
     thread = threading.Thread(target=run_task)
     thread.start()
     
     return jsonify({
-        'success': True, 
-        'message': '任务已启动，请稍候...',
+        'success': True,
+        'message': '任务已启动，使用 GBIF 异步下载，请等待完成...',
         'species_info': global_species_info
     })
 
@@ -469,12 +511,57 @@ def fetch():
 @app.route('/api/logs')
 def get_logs():
     """获取日志 API"""
+    download_urls = []
+    if global_download_files and not is_running:
+        download_urls = [f"/api/download/{f}" for f in global_download_files]
+    
     return jsonify({
         'logs': global_logs[-50:],
         'progress': global_progress,
         'species_info': global_species_info,
-        'is_running': is_running
+        'is_running': is_running,
+        'download_files': global_download_files,
+        'download_urls': download_urls
     })
+
+
+@app.route('/api/cancel', methods=['POST'])
+def cancel_task():
+    """取消当前运行的任务"""
+    global is_running, global_logs
+    
+    if not is_running:
+        return jsonify({'success': False, 'message': '没有正在运行的任务'})
+    
+    is_running = False
+    global_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] 任务已被用户取消")
+    
+    return jsonify({'success': True, 'message': '任务已取消'})
+
+
+@app.route('/api/download-history')
+def get_download_history():
+    """获取用户的 GBIF 下载历史"""
+    username = request.args.get('username', '').strip()
+    password = request.args.get('password', '').strip()
+    
+    if not username or not password:
+        return jsonify({'success': False, 'message': '请提供 GBIF 账号信息'})
+    
+    try:
+        result = occ.download_list(user=username, pwd=password, limit=20)
+        downloads = []
+        for item in result.get('results', []):
+            downloads.append({
+                'key': item.get('key', ''),
+                'status': item.get('status', ''),
+                'created': item.get('created', ''),
+                'size': item.get('size', 0),
+                'downloadLink': item.get('downloadLink', '')
+            })
+        return jsonify({'success': True, 'downloads': downloads})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 
 @app.route('/api/download/<filename>')
@@ -484,6 +571,39 @@ def download(filename):
     if os.path.exists(file_path):
         return send_file(file_path, as_attachment=True)
     return jsonify({'success': False, 'message': '文件不存在'}), 404
+
+
+@app.route('/api/download-all')
+def download_all():
+    """一键下载所有文件（ZIP打包）"""
+    global global_download_files
+    
+    if not global_download_files:
+        return jsonify({'success': False, 'message': '没有可下载的文件'}), 404
+    
+    first_file = global_download_files[0]
+    parts = first_file.replace('.xlsx', '').replace('.csv', '').split('_')
+    species_name = parts[0] if len(parts) > 0 else 'species'
+    date_str = parts[1] if len(parts) > 1 else datetime.now().strftime("%Y%m%d")
+    download_id = parts[2] if len(parts) > 2 else datetime.now().strftime("%H%M%S")
+    
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for filename in global_download_files:
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            if os.path.exists(file_path):
+                zip_file.write(file_path, filename)
+    
+    zip_buffer.seek(0)
+    
+    zip_filename = f"{species_name}_{date_str}_{download_id}.zip"
+    
+    return send_file(
+        zip_buffer,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=zip_filename
+    )
 
 
 if __name__ == '__main__':
