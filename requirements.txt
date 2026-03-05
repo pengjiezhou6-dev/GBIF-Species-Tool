@@ -2,7 +2,7 @@ Flask==3.0.0
 flask-cors==4.0.0
 pandas==2.2.0
 pycountry==24.6.1
-pygbif==0.8.0
+pygbif==0.6.6
 openpyxl==3.1.2
 requests==2.31.0
 Werkzeug==3.0.1
