@@ -564,6 +564,93 @@ def get_download_history():
         return jsonify({'success': False, 'message': str(e)})
 
 
+@app.route('/api/parse-template', methods=['POST'])
+def parse_template():
+    """解析模板文件 API"""
+    try:
+        if 'template' not in request.files:
+            return jsonify({'success': False, 'message': '未找到模板文件'})
+        
+        file = request.files['template']
+        if file.filename == '':
+            return jsonify({'success': False, 'message': '未选择文件'})
+        
+        filename = file.filename.lower()
+        
+        columns = []
+        file_format = ''
+        
+        if filename.endswith('.xlsx'):
+            file_format = 'xlsx'
+            df = pd.read_excel(file, nrows=0)
+            columns = list(df.columns)
+        elif filename.endswith('.csv'):
+            file_format = 'csv'
+            df = pd.read_csv(file, nrows=0)
+            columns = list(df.columns)
+        elif filename.endswith('.json'):
+            file_format = 'json'
+            df = pd.read_json(file, typ='series')
+            if isinstance(df, pd.DataFrame):
+                columns = list(df.columns)
+            else:
+                return jsonify({'success': False, 'message': 'JSON 格式不支持，请使用数组格式的 JSON'})
+        else:
+            return jsonify({'success': False, 'message': '不支持的文件格式，请使用 XLSX、CSV 或 JSON'})
+        
+        FIELD_MAPPING = {
+            'species': 'scientificName',
+            'longitude': 'decimalLongitude',
+            'latitude': 'decimalLatitude',
+            'country': 'countryCode',
+            'admin1': 'stateProvince',
+            'year': 'year',
+            'source': None,
+            'n_individuals': 'individualCount',
+            'host_class': None,
+            'obs_type': None,
+            'remarks': None
+        }
+        
+        REVERSE_MAPPING = {v: k for k, v in FIELD_MAPPING.items() if v is not None}
+        
+        matching = {}
+        matched_columns = set()
+        
+        for col in columns:
+            col_lower = col.lower().strip()
+            
+            if col_lower in FIELD_MAPPING:
+                matching[col] = col_lower
+                matched_columns.add(col)
+            elif col_lower in REVERSE_MAPPING:
+                matching[col] = REVERSE_MAPPING[col_lower]
+                matched_columns.add(col)
+            else:
+                for standard_field, gbif_field in FIELD_MAPPING.items():
+                    if gbif_field and gbif_field.lower() in col_lower:
+                        matching[col] = standard_field
+                        matched_columns.add(col)
+                        break
+                    elif standard_field in col_lower or (standard_field.replace('_', '') in col_lower.replace('_', '').replace(' ', '')):
+                        matching[col] = standard_field
+                        matched_columns.add(col)
+                        break
+        
+        unmatched = [col for col in columns if col not in matched_columns]
+        
+        return jsonify({
+            'success': True,
+            'format': file_format,
+            'columns': columns,
+            'matching': matching,
+            'unmatched': unmatched
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'解析失败：{str(e)}'})
+
+
 @app.route('/api/download/<filename>')
 def download(filename):
     """下载文件 API"""
@@ -608,7 +695,7 @@ def download_all():
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("GBIF 物种数据获取工具 Web 版 v2.4")
+    print("GBIF 物种数据获取工具 Web 版 v3.0")
     print("=" * 50)
     print("启动服务器...")
     print("访问地址：http://localhost:5000")
